@@ -78,7 +78,7 @@ input[type=color]{width:100%;height:38px;border:1px solid var(--ln);border-radiu
 <script>(function L(i){const v=['5.1.3','5.1.2','5.1.1','5.0.2'];if(window.Mp4Muxer||i>=v.length)return;const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/mp4-muxer@'+v[i]+'/build/mp4-muxer.js';s.onerror=()=>L(i+1);document.head.appendChild(s)})(0)</script>
 <script>
 const $=i=>document.getElementById(i),c=$('c'),cx=c.getContext('2d'),M=document.createElement('canvas'),g=M.getContext('2d'),tc=document.createElement('canvas');
-let W=1080,H=1920,Q=.5,logo=null,ad=null,pic=null,introEl=null,t0=performance.now(),lastCT=0,lastP=0,G={tz:285,bz:285,big:true},F='',AC='',TX='',busy=false,ex=false,vfile=null,DEFLOGO=null;
+let W=1080,H=1920,Q=.5,logo=null,ad=null,pic=null,introEl=null,t0=performance.now(),lastCT=0,lastP=0,G={tz:285,bz:285,big:true},F='',AC='',TX='',busy=false,ex=false,vfile=null,DEFLOGO=null,mediaURL=null;
 const vid=document.createElement('video');vid.muted=vid.loop=vid.playsInline=true;
 const SZ={916:[1080,1920],45:[1080,1350],11:[1080,1080],169:[1920,1080]},LN={clean:'শুধু ভিডিও',banner:'ব্যানার',card:'কার্ড',overlay:'ফুল ভিডিও'};
 // name, layout, top, bottom, panel, text, highlight, badge
@@ -101,7 +101,7 @@ $('irp').onclick=resetT;
 function fileImg(f,cb){const i=new Image();i.onload=()=>cb(i);i.src=URL.createObjectURL(f)}
 $('logo').onchange=e=>{const f=e.target.files[0];if(f)fileImg(f,i=>{logo=i})};
 $('ifile').onchange=e=>{const f=e.target.files[0];if(!f)return;if(f.type.startsWith('video')){const v=document.createElement('video');v.muted=true;v.playsInline=true;v.src=URL.createObjectURL(f);introEl=v;resetT()}else fileImg(f,i=>{introEl=i;resetT()})};
-$('media').onchange=e=>{const f=e.target.files[0];if(!f)return;const u=URL.createObjectURL(f);if(f.type.startsWith('video')){vfile=f;pic=null;vid.src=u;vid.play().catch(()=>{})}else{vfile=null;vid.removeAttribute('src');vid.load();fileImg(f,i=>{pic=i})}resetT()};
+$('media').onchange=e=>{const f=e.target.files[0];if(!f)return;warned=false;if(mediaURL)URL.revokeObjectURL(mediaURL);const u=URL.createObjectURL(f);mediaURL=u;if(f.type.startsWith('video')){vfile=f;pic=null;vid.src=u;vid.play().catch(()=>{})}else{vfile=null;vid.removeAttribute('src');vid.load();fileImg(f,i=>{pic=i})}resetT()};
 $('ad').onchange=e=>{const f=e.target.files[0];if(f)fileImg(f,i=>{ad=i})};
 $('adr').onclick=()=>{ad=null;$('ad').value=''};
 $('pp').onclick=()=>vid.paused?vid.play():vid.pause();
@@ -183,21 +183,118 @@ c.addEventListener('pointermove',e=>{if(!drag)return;const p=pt(e);$('lx').value
 const say=s=>$('sx').textContent=s;
 async function save(b,ext){const d=window.claude?await window.claude.use('downloads').catch(()=>null):null;
  if(d){try{await d.save({filename:'news-frame.'+ext,data:b});say('সেভ হয়েছে!')}catch(e){say(e.code==='declined'?'সেভ বাতিল।':'সেভ হয়নি: '+(e.message||e.code))}return}
- const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='news-frame.'+ext;document.body.appendChild(a);a.click();a.remove();say('ডাউনলোড শুরু হয়েছে।')}
+ const a=document.createElement('a');const u=URL.createObjectURL(b);a.href=u;a.download='news-frame.'+ext;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),60000);say('ডাউনলোড শুরু হয়েছে।')}
 let ac,dest;
-function legacy(){
+// ---- Android-only export: inspection + MediaRecorder (disk) primary, VideoEncoder fallback ----
+// FFmpeg.wasm is deliberately NOT used: it loads the whole source video into
+// WASM memory (RAM) and needs COOP/COEP headers this host does not send.
+// Browser-native MediaRecorder (hardware encoder) + VideoEncoder use far
+// less memory on Android, which is what long videos need.
+let exporting=false,cancelReq=false,cancelFn=null,warned=false,lastExpFile=null;
+function inspectExport(){
+ const dur=vid.duration||0,vw=vid.videoWidth||0,vh=vid.videoHeight||0,sz=vfile?vfile.size:0;
+ const mem=navigator.deviceMemory||0,qv=+$('q').value;
+ const mp4OK=!!(window.MediaRecorder&&['video/mp4;codecs="avc1.64002A,mp4a.40.2"','video/mp4'].some(t=>{try{return MediaRecorder.isTypeSupported(t)}catch(e){return false}}));
+ const veOK=!!(window.VideoEncoder&&window.Mp4Muxer);
+ const opfsOK=!!(navigator.storage&&navigator.storage.getDirectory);
+ let rec='1080p',warn='';
+ if(dur>600)warn='এই ভিডিও ১০ মিনিটের বেশি — ফোনে এক্সপোর্ট অনেক সময় নেবে, মাঝে থেমে যেতে পারে।'+(qv>.7?' 720p বেছে নিলে নিরাপদে হবে।':'');
+ else if(dur>300&&qv>.7)warn='এই ভিডিও ৫ মিনিটের বেশি — 720p বেছে নিলে ক্র্যাশের ঝুঁকি কমবে।';
+ else if(mem&&mem<=4&&qv>.7)warn='এই ফোনের মেমোরি কম — 720p বেছে নিলে নিরাপদে হবে।';
+ if((mem&&mem<=4)||dur>300||vw>=3840||vh>=2160)rec='720p';
+ return{dur,vw,vh,sz,mem,mp4OK,veOK,opfsOK,rec,warn};
+}
+function saveExpStatus(st){try{localStorage.setItem('nfsExp',JSON.stringify(st))}catch(e){}}
+function showLastExp(){try{const j=JSON.parse(localStorage.getItem('nfsExp')||'null');if(j&&j.status)say('শেষ এক্সপোর্ট: '+(j.status==='ok'?'সফল':j.status==='cancel'?'বাতিল':'ব্যর্থ')+' ('+j.q+', '+Math.round(j.dur)+' সেকেন্ড)'+(j.err?' — '+j.err:''))}catch(e){}}
+function setExpBtn(on){$('dv').textContent=on?'এক্সপোর্ট বাতিল করুন':'ভিডিও এক্সপোর্ট'}
+async function recExport(){
  if(!vid.src||!vid.duration){say('আগে একটি ভিডিও আপলোড করুন।');return}
- const mt=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
+ const info=inspectExport();
+ const mtList=info.mp4OK?['video/mp4;codecs="avc1.64002A,mp4a.40.2"','video/mp4']:['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+ const mt=mtList.find(t=>{try{return MediaRecorder.isTypeSupported(t)}catch(e){return false}});
  if(!mt){say('এই ব্রাউজারে রেকর্ড হয় না। Chrome ব্যবহার করুন।');return}
+ const isMp4=mt.indexOf('mp4')>=0,ext=isMp4?'mp4':'webm';
+ if(!isMp4&&info.veOK){fast();return}
  if(!ac){ac=new AudioContext();dest=ac.createMediaStreamDestination();ac.createMediaElementSource(vid).connect(dest)}
- ac.resume();const eq=+$('q').value;Q=eq;busy=true;paint(0);const st=M.captureStream(30);dest.stream.getAudioTracks().forEach(t=>st.addTrack(t));
- const rec=new MediaRecorder(st,{mimeType:mt,videoBitsPerSecond:eq>.9?16e6:9e6}),ch=[];let done=false,iv,to;
- const stop=()=>{if(done)return;done=true;clearInterval(iv);clearTimeout(to);vid.onended=null;if(rec.state==='recording')rec.stop()};
- rec.ondataavailable=e=>e.data.size&&ch.push(e.data);
- rec.onstop=()=>{Q=.5;busy=false;vid.loop=true;vid.muted=true;vid.play().catch(()=>{});$('dv').disabled=false;save(new Blob(ch,{type:mt}),mt.includes('mp4')?'mp4':'webm')};
- vid.pause();vid.loop=false;vid.muted=false;$('dv').disabled=true;vid.onended=stop;
- const begin=()=>{lastCT=0;resetT();vid.play().then(()=>{rec.start();to=setTimeout(stop,vid.duration*1000+5000);iv=setInterval(()=>{say(`রেকর্ড হচ্ছে... ${vid.currentTime.toFixed(1)}s / ${vid.duration.toFixed(1)}s (স্ক্রিন চালু রাখুন)`);if(vid.currentTime>=vid.duration-.05)stop()},250)}).catch(()=>{$('dv').disabled=false;Q=.5;busy=false;say('প্লে শুরু হয়নি। আবার চেষ্টা করুন।')})};
- if(vid.currentTime<.05&&vid.readyState>=2)begin();else{const f=()=>{vid.removeEventListener('seeked',f);begin()};vid.addEventListener('seeked',f);vid.currentTime=0}
+ try{await ac.resume()}catch(e){}
+ const eq=+$('q').value,dur=vid.duration;
+ const br=Math.min(eq>.9?10e6:eq>.5?6e6:4.5e6,dur>90?6e6:99e6);
+ let useDisk=false,fh=null,writable=null;
+ if(info.opfsOK){try{const dir=await navigator.storage.getDirectory();
+  if(lastExpFile){try{await dir.removeEntry(lastExpFile)}catch(e){}}
+  fh=await dir.getFileHandle('NewsFrameStudio_rec.'+ext,{create:true});useDisk=true;
+ }catch(e){useDisk=false;fh=null}}
+ if(useDisk){try{writable=await fh.createWritable()}catch(e){useDisk=false;writable=null}}
+ const ch=[];
+ exporting=true;cancelReq=false;setExpBtn(true);$('dv').disabled=false;
+ busy=true;Q=eq;
+ const st=M.captureStream(30);
+ dest.stream.getAudioTracks().forEach(t=>st.addTrack(t));
+ const rec=new MediaRecorder(st,{mimeType:mt,videoBitsPerSecond:br});
+ let done=false,iv=null,to=null,t0=performance.now();
+ const finish=async()=>{
+  if(done)return;done=true;
+  clearInterval(iv);clearTimeout(to);vid.onended=null;vid.pause();
+  if(rec.state==='recording'){try{rec.stop()}catch(e){}}
+ };
+ cancelFn=()=>finish();
+ rec.ondataavailable=async e=>{
+  if(!e.data||!e.data.size)return;
+  if(useDisk&&writable){try{await writable.write(e.data)}catch(err){useDisk=false;ch.push(e.data)}}
+  else ch.push(e.data);
+ };
+ rec.onstop=async()=>{
+  const wasCancel=cancelReq;
+  Q=.5;busy=false;exporting=false;cancelReq=false;cancelFn=null;setExpBtn(false);
+  vid.loop=true;vid.muted=true;
+  let file=null;
+  if(useDisk&&writable){try{await writable.close()}catch(e){}}
+  if(useDisk&&fh){try{file=await fh.getFile()}catch(e){file=null}}
+  if(wasCancel){
+   if(useDisk&&fh){try{const dir=await navigator.storage.getDirectory();await dir.removeEntry('NewsFrameStudio_rec.'+ext)}catch(e){}}
+   lastExpFile=null;vid.currentTime=0;vid.play().catch(()=>{});
+   saveExpStatus({status:'cancel',q:$('q').value,dur:vid.duration,at:Date.now()});
+   say('এক্সপোর্ট বাতিল হয়েছে।');resetT();return;
+  }
+  if(!file&&ch.length)file=new Blob(ch,{type:mt});
+  if(!file||file.size<=0){
+   say('এক্সপোর্ট ব্যর্থ: ফাইলটি খালি। 720p-তে আবার চেষ্টা করুন।');
+   saveExpStatus({status:'fail',q:$('q').value,dur:vid.duration,err:'খালি ফাইল',at:Date.now()});
+   vid.currentTime=0;vid.play().catch(()=>{});resetT();return;
+  }
+  lastExpFile='NewsFrameStudio_rec.'+ext;
+  saveExpStatus({status:'ok',q:$('q').value,dur:vid.duration,at:Date.now()});
+  await save(file,ext);
+  vid.currentTime=0;vid.play().catch(()=>{});resetT();
+ };
+ rec.onerror=()=>{say('রেকর্ড ত্রুটি — 720p-তে আবার চেষ্টা করুন।');finish();setTimeout(()=>{if(exporting){exporting=false;cancelFn=null;setExpBtn(false);Q=.5;busy=false;vid.loop=true;vid.muted=true}},5000)};
+ vid.pause();vid.loop=false;vid.muted=false;
+ const begin=()=>{
+  lastCT=0;resetT();
+  vid.play().then(()=>{
+   rec.start(1000);
+   vid.onended=()=>finish();
+   to=setTimeout(()=>{if(!done)finish()},dur*1000+15000);
+   iv=setInterval(()=>{
+    const t=vid.currentTime,pc=Math.min(99,Math.round(t/dur*100));
+    const el=(performance.now()-t0)/1000,rem=t>1?Math.round(el/t*(dur-t)):0;
+    say('এক্সপোর্ট '+pc+'% • বাকি ~'+rem+' সেকেন্ড'+(useDisk?'':' (ডিস্কে লেখা যাচ্ছে না)'));
+    if(t>=dur-.05)finish();
+   },500);
+  }).catch(()=>{exporting=false;cancelFn=null;setExpBtn(false);Q=.5;busy=false;say('প্লে শুরু হয়নি। আবার চেষ্টা করুন।')});
+ };
+ if(vid.currentTime<.05&&vid.readyState>=2)begin();
+ else{const f=()=>{vid.removeEventListener('seeked',f);begin()};vid.addEventListener('seeked',f);vid.currentTime=0}
+}
+function exportRouter(){
+ if(exporting){cancelReq=true;if(cancelFn)cancelFn();return}
+ if(!vid.src||!vid.duration){say('আগে একটি ভিডিও আপলোড করুন।');return}
+ const info=inspectExport();
+ if(info.warn&&!warned){warned=true;say(info.warn+' আবার এক্সপোর্ট চাপ দিলে শুরু হবে।');return}
+ warned=false;
+ if(info.mp4OK){recExport();return}
+ if(info.veOK){fast();return}
+ recExport();
 }
 
 const seek=(v,t)=>new Promise(r=>{if(Math.abs(v.currentTime-t)<.001&&v.readyState>=2)return r();let d=false;const f=()=>{if(d)return;d=true;v.removeEventListener('seeked',f);r()};v.addEventListener('seeked',f);setTimeout(f,1500);v.currentTime=t});
@@ -207,8 +304,8 @@ async function fast(){
  const FPS=30,eq=+$('q').value,w=2*Math.round(W*eq/2),h=2*Math.round(H*eq/2),br=Math.min(eq>.9?10e6:eq>.5?6e6:4.5e6,dur>90?6e6:99e6);
  const cfg={codec:'avc1.64002A',width:w,height:h,bitrate:br,framerate:FPS,latencyMode:'quality'};
  let ok=false;try{ok=(await VideoEncoder.isConfigSupported(cfg)).supported}catch(e){}
- if(!ok){legacy();return}
- $('dv').disabled=true;vid.pause();let ab=null,sr=0,ch=0;
+ if(!ok){recExport();return}
+ $('dv').disabled=false;exporting=true;cancelReq=false;setExpBtn(true);vid.pause();let ab=null,sr=0,ch=0;
  if(vfile&&window.AudioEncoder){try{say('অডিও প্রস্তুত হচ্ছে...');const a=new AudioContext();ab=await a.decodeAudioData(await vfile.arrayBuffer());a.close();sr=ab.sampleRate;ch=Math.min(2,ab.numberOfChannels);
   const ac2={codec:'mp4a.40.2',sampleRate:sr,numberOfChannels:ch,bitrate:128000};if(!(await AudioEncoder.isConfigSupported(ac2)).supported)ab=null}catch(e){ab=null}}
  ex=true;busy=true;Q=eq;
@@ -236,6 +333,7 @@ async function fast(){
    return new Promise(res=>{
     const dead=setTimeout(()=>res(false),Math.round(dur/R*1000)+30000);
     const step=()=>{
+     if(cancelReq){clearTimeout(dead);res('cancel');return}
      if(vid.ended||vid.currentTime>=dur-.03){clearTimeout(dead);res(frames>0);return}
      const t=vid.currentTime;if(t>lastT+.001){lastT=t;lastAdv=performance.now()}if(performance.now()-lastAdv>3000){clearTimeout(dead);res(false);return}
      if(t-lastEnc>=1/FPS-.001&&t>=0&&ve.encodeQueueSize<=8&&vid.readyState>=2){lastEnc=t;paint(t,1);
@@ -245,19 +343,19 @@ async function fast(){
      requestAnimationFrame(step)};
     vid.play().then(()=>{if(introEl&&introEl.tagName==='VIDEO')introEl.play().catch(()=>{});step()}).catch(()=>{clearTimeout(dead);res(false)});
    })};
-  let okPlay=await playCap();if(okPlay&&frames<expF*.25)okPlay=false;
+  let okPlay=await playCap();if(okPlay==='cancel'||cancelReq)throw new Error('__cancel__');if(okPlay&&frames<expF*.25)okPlay=false;
   if(!okPlay){
    say('দ্রুত মোড কাজ করেনি — সাধারণ মোডে এক্সপোর্ট হচ্ছে...');
    try{ve.close()}catch(e){}
    if(useDisk&&writable){try{await writable.close()}catch(e){}}({mux,ve,ae,parts}=await setupEnc());await encAudio(ae);
    const total=Math.floor(dur*FPS),t01=performance.now();
-   for(let i=0;i<total;i++){const t=i/FPS;await seek(vid,Math.min(t,dur-.001));paint(t,1);
+   for(let i=0;i<total;i++){if(cancelReq)throw new Error('__cancel__');const t=i/FPS;await seek(vid,Math.min(t,dur-.001));paint(t,1);
     const vf=new VideoFrame(M,{timestamp:Math.round(i*1e6/FPS),duration:Math.round(1e6/FPS)});ve.encode(vf,{keyFrame:i%(FPS*2)===0});vf.close();
     while(ve.encodeQueueSize>8)await wait(2);
     if(i%4===0){const el=(performance.now()-t01)/1000;say(`এক্সপোর্ট ${Math.round(i/total*100)}% • আনুমানিক বাকি ${Math.round(el/(i+1)*(total-i))} সেকেন্ড`)}}
   }
-  await ve.flush();ve.close();mux.finalize();ab=null;if(useDisk){await writable.close();const file=await fh.getFile();await save(file,'mp4')}else{let _sz=0;for(const p of parts)_sz=Math.max(_sz,p.pos+p.data.length);const _out=new Uint8Array(_sz);for(const p of parts)_out.set(p.data,p.pos);parts.length=0;await save(new Blob([_out],{type:'video/mp4'}),'mp4');}
- }catch(e){say('এক্সপোর্ট ব্যর্থ: '+(e.message||e))}
- ex=false;busy=false;Q=.5;$('dv').disabled=false;vid.loop=true;vid.muted=true;vid.playbackRate=1;vid.currentTime=0;vid.play().catch(()=>{});resetT()}
-$('dv').onclick=()=>window.VideoEncoder&&window.Mp4Muxer?fast():legacy();
+  await ve.flush();ve.close();mux.finalize();ab=null;if(useDisk){await writable.close();const file=await fh.getFile();await save(file,'mp4')}else{let _sz=0;for(const p of parts)_sz=Math.max(_sz,p.pos+p.data.length);const _out=new Uint8Array(_sz);for(const p of parts)_out.set(p.data,p.pos);parts.length=0;await save(new Blob([_out],{type:'video/mp4'}),'mp4');}saveExpStatus({status:'ok',q:$('q').value,dur:vid.duration,at:Date.now()});
+ }catch(e){if(e.message==='__cancel__'||cancelReq){say('এক্সপোর্ট বাতিল হয়েছে।');saveExpStatus({status:'cancel',q:$('q').value,dur:vid.duration,at:Date.now()})}else{say('এক্সপোর্ট ব্যর্থ: '+(e.message||e));saveExpStatus({status:'fail',q:$('q').value,dur:vid.duration,err:String(e.message||e).slice(0,80),at:Date.now()})}}
+ ex=false;busy=false;exporting=false;cancelReq=false;cancelFn=null;setExpBtn(false);Q=.5;$('dv').disabled=false;vid.loop=true;vid.muted=true;vid.playbackRate=1;vid.currentTime=0;vid.play().catch(()=>{});resetT()}
+$('dv').onclick=exportRouter;showLastExp();
 </script></body></html>
