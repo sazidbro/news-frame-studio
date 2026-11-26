@@ -226,26 +226,26 @@ async function fast(){
   paint(0,1);
   let{mux,ve,ae,parts}=await setupEnc();
   await encAudio(ae);
-  const t00=performance.now();let frames=0;
+  const t00=performance.now();let frames=0;const expF=Math.max(1,Math.round(dur*FPS));
   const playCap=async()=>{
    vid.loop=false;vid.muted=true;vid.playbackRate=R;
    if(introEl&&introEl.tagName==='VIDEO'){introEl.loop=false;introEl.muted=true;introEl.playbackRate=R}
    await seek(vid,0);
    if(introEl&&introEl.tagName==='VIDEO')await seek(introEl,0);
-   let lastEnc=-1;
+   let lastEnc=-1,lastT=-1,lastAdv=performance.now();
    return new Promise(res=>{
     const dead=setTimeout(()=>res(false),Math.round(dur/R*1000)+30000);
     const step=()=>{
      if(vid.ended||vid.currentTime>=dur-.03){clearTimeout(dead);res(frames>0);return}
-     const t=vid.currentTime;
-     if(t-lastEnc>=1/FPS-.001&&t>=0){lastEnc=t;paint(t,1);
+     const t=vid.currentTime;if(t>lastT+.001){lastT=t;lastAdv=performance.now()}if(performance.now()-lastAdv>3000){clearTimeout(dead);res(false);return}
+     if(t-lastEnc>=1/FPS-.001&&t>=0&&ve.encodeQueueSize<=8&&vid.readyState>=2){lastEnc=t;paint(t,1);
       const vf=new VideoFrame(M,{timestamp:Math.round(t*1e6),duration:Math.round(1e6/FPS)});ve.encode(vf,{keyFrame:Math.floor(t*FPS)%(FPS*2)===0});vf.close();frames++;
       if(frames%15===0)say(`এক্সপোর্ট ${Math.round(t/dur*100)}% • ${R}x গতিতে চলছে`)}
      if(ve.encodeQueueSize>8){setTimeout(step,4);return}
      requestAnimationFrame(step)};
     vid.play().then(()=>{if(introEl&&introEl.tagName==='VIDEO')introEl.play().catch(()=>{});step()}).catch(()=>{clearTimeout(dead);res(false)});
    })};
-  let okPlay=await playCap();
+  let okPlay=await playCap();if(okPlay&&frames<expF*.25)okPlay=false;
   if(!okPlay){
    say('দ্রুত মোড কাজ করেনি — সাধারণ মোডে এক্সপোর্ট হচ্ছে...');
    try{ve.close()}catch(e){}
